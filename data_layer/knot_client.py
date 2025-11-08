@@ -1,5 +1,8 @@
 import os, requests
 from typing import Dict, Any, List
+from dotenv import load_dotenv
+
+load_dotenv()
 
 KNOT_CLIENT_ID = os.getenv("KNOT_CLIENT_ID")
 KNOT_SECRET = os.getenv("KNOT_SECRET")
