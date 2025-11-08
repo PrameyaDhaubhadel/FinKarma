@@ -1,6 +1,9 @@
 import os, requests
 from typing import List, Dict, Any
 from urllib.parse import urlencode
+from dotenv import load_dotenv
+
+load_dotenv()
 
 NESSIE_KEY = os.getenv("NESSIE_API_KEY")
 BASE = "https://api.nessieisreal.com"  # official docs base
