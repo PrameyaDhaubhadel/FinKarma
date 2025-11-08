@@ -1,4 +1,4 @@
-import os, asyncio
+import os
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from dedalus_labs import AsyncDedalus, DedalusRunner
@@ -36,24 +36,33 @@ def micro_recos(persona: str, risk_score: float) -> List[str]:
     return base[:4]
 
 async def run_agent(user_text: str, nessie_txns, knot_txns, persona_style: str = "Zen Monk") -> str:
-    client = AsyncDedalus()
-    runner = DedalusRunner(client)
-
-    tools = [compute_fin_risk, micro_recos]
+    """
+    New approach: precompute risk/persona in Python, inject into prompt.
+    No `system` and no `tool_context` (not supported by current Runner).
+    """
+    ctx = compute_fin_risk(nessie_txns, knot_txns)
+    recos = micro_recos(ctx["persona"], ctx["risk_score"])
 
     prompt = f"""
 You are **FinKarma**, a friendly finance guardian. Persona: {persona_style}.
 Be supportive, not judgmental. Use specific, behavioral suggestions.
-You can call tools: `compute_fin_risk(nessie_txns, knot_txns)` and `micro_recos(persona, risk_score)`.
+Context you can rely on (precomputed from user transactions):
+- risk_score: {ctx['risk_score']:.2f}  (0–2 scale; >1.2 = high risk)
+- persona: {ctx['persona']}
+- top_spend_buckets (last 14–30 days): {ctx['top_buckets']}
+- example_micro_recommendations: {recos}
 
-User request:
-{user_text}
+User said:
+\"\"\"{user_text}\"\"\"
+
+Task:
+1) In 2–4 concise bullets, give tailored, behavior-level tips.
+2) Refer to the relevant spend buckets if useful.
+3) If risk is high (>1.2), open with a quick ⚠️ heads-up.
+4) Keep the tone aligned with persona = {persona_style}.
 """
 
-    result = await runner.run(
-        input=prompt,
-        model=MODEL,
-        tools=tools,
-        tool_context={"nessie_txns": nessie_txns, "knot_txns": knot_txns},
-    )
-    return result.final_output
+    async with AsyncDedalus() as client:
+        runner = DedalusRunner(client)
+        result = await runner.run(input=prompt, model=MODEL)  # ✅ no `system`, no `tool_context`
+        return result.final_output
