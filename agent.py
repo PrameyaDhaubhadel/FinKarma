@@ -1,11 +1,22 @@
+# agent.py
 import os
 from typing import List, Dict, Any
 from dotenv import load_dotenv
-from dedalus_labs import AsyncDedalus, DedalusRunner
 from data_layer.model_features import to_df, risk_score, cluster_persona
+
+# LLM is optional now
+try:
+    from dedalus_labs import AsyncDedalus, DedalusRunner
+    from dedalus_labs import APIStatusError  # for 402 catch
+except Exception:  # no SDK or import error
+    AsyncDedalus = None
+    DedalusRunner = None
+    class APIStatusError(Exception): ...
+    pass
 
 load_dotenv()
 MODEL = os.getenv("DEDALUS_MODEL", "openai/gpt-5-mini")
+USE_LLM = os.getenv("DEDALUS_USE_LLM", "true").lower() in {"1","true","yes","on"}
 
 def compute_fin_risk(nessie_txns: List[Dict[str,Any]], knot_txns: List[Dict[str,Any]]) -> Dict[str, Any]:
     df = to_df(nessie_txns, knot_txns)
@@ -18,35 +29,51 @@ def micro_recos(persona: str, risk_score: float) -> List[str]:
     base = []
     if persona == "late_night_impulse":
         base = ["Set a food cut-off at 10:30pm with a 5-min reflection timer.",
-                "Auto-prepare a 2-minute grocery list for tomorrow morning.",
-                "Swap 1 late-night delivery/week for ready meals → save ~$40/wk."]
+                "Prep a 2-minute grocery list for tomorrow morning.",
+                "Swap 1 late-night delivery/week for a ready meal → save ~$40/wk."]
     elif persona == "weekend_splurger":
         base = ["Pre-commit a fixed 'treat budget' on Fridays.",
-                "Surface cheaper bundle alternatives on Sat/Sun afternoons.",
+                "Compare 2 cheaper bundle options before checkout.",
                 "Delay purchases >$30 by 24 hours."]
     elif persona == "daytime_convenience":
-        base = ["Batch errands; avoid 3 small rideshares with 1 planned ride.",
+        base = ["Batch errands; replace 3 short rideshares with 1 planned ride.",
                 "Pack snacks/lunch 2 days/week.",
                 "Auto-cancel duplicate convenience subscriptions."]
     else:
-        base = ["Track one category this week and cap at 80% of average.",
-                "Enable alerts for purchases > median ticket size."]
+        base = ["Track one category this week and cap at 80% of your average.",
+                "Enable alerts for purchases > your median ticket size."]
     if risk_score >= 1.2:
-        base.insert(0, "⚠️ High-risk window this week. Try one micro-rule today.")
+        base.insert(0, "⚠️ You’re in a high-risk window this week. Try one micro-rule today.")
     return base[:4]
 
+def _render_offline_reply(user_text: str, ctx: Dict[str, Any], recos: List[str], persona_style: str) -> str:
+    header = f"{'🧘 ' if persona_style=='Zen Monk' else '🔥 ' if persona_style=='Savage Best Friend' else '📈 '}**FinKarma ({persona_style})**"
+    lines = [header, "", f"Risk score: **{ctx['risk_score']:.2f}** · Persona: **{ctx['persona']}** · Top spend: **{ctx['top_buckets']}**", ""]
+    if ctx["risk_score"] >= 1.2:
+        lines.append("⚠️ You’re trending toward a low-balance week. Small tweaks now will prevent regret later.")
+    lines.append(f"**You said:** {user_text}")
+    lines.append("")
+    lines.append("**Try this next:**")
+    for r in recos:
+        lines.append(f"- {r}")
+    lines.append("")
+    lines.append("_(LLM is temporarily offline; showing smart rule-based tips so you can keep demoing.)_")
+    return "\n".join(lines)
+
 async def run_agent(user_text: str, nessie_txns, knot_txns, persona_style: str = "Zen Monk") -> str:
-    """
-    New approach: precompute risk/persona in Python, inject into prompt.
-    No `system` and no `tool_context` (not supported by current Runner).
-    """
+    # Precompute context
     ctx = compute_fin_risk(nessie_txns, knot_txns)
     recos = micro_recos(ctx["persona"], ctx["risk_score"])
 
+    # If LLM disabled or SDK missing, return offline reply
+    if not USE_LLM or AsyncDedalus is None or DedalusRunner is None:
+        return _render_offline_reply(user_text, ctx, recos, persona_style)
+
+    # Otherwise try LLM, fall back on 402 / any error
     prompt = f"""
 You are **FinKarma**, a friendly finance guardian. Persona: {persona_style}.
 Be supportive, not judgmental. Use specific, behavioral suggestions.
-Context you can rely on (precomputed from user transactions):
+Context (precomputed from user transactions):
 - risk_score: {ctx['risk_score']:.2f}  (0–2 scale; >1.2 = high risk)
 - persona: {ctx['persona']}
 - top_spend_buckets (last 14–30 days): {ctx['top_buckets']}
@@ -61,8 +88,14 @@ Task:
 3) If risk is high (>1.2), open with a quick ⚠️ heads-up.
 4) Keep the tone aligned with persona = {persona_style}.
 """
-
-    async with AsyncDedalus() as client:
-        runner = DedalusRunner(client)
-        result = await runner.run(input=prompt, model=MODEL)  # ✅ no `system`, no `tool_context`
-        return result.final_output
+    try:
+        async with AsyncDedalus() as client:
+            runner = DedalusRunner(client)
+            result = await runner.run(input=prompt, model=MODEL)
+            return result.final_output
+    except APIStatusError as e:
+        # e.g., 402 balance error → fallback
+        return _render_offline_reply(user_text, ctx, recos, persona_style)
+    except Exception:
+        # any other network/SDK error → fallback
+        return _render_offline_reply(user_text, ctx, recos, persona_style)
