@@ -1,10 +1,16 @@
-import os, asyncio, pandas as pd, streamlit as st
+import os
 from dotenv import load_dotenv
+
+load_dotenv()
+
+import asyncio
+import pandas as pd
+import streamlit as st
+
 from data_layer.nessie_client import get_sample_transactions
 from data_layer.knot_client import dev_bootstrap_first_account, get_merchant_accounts, list_transactions
 from agent import run_agent
 
-load_dotenv()
 st.set_page_config(page_title="FinKarma", layout="centered")
 st.title("FinKarma — Finance Guardian")
 st.caption("Nessie (mock banking) + Knot (merchant/SKU) + Dedalus (AI agent)")

@@ -32,7 +32,7 @@ def micro_recos(persona: str, risk_score: float) -> List[str]:
       base = ["Track one category this week and cap at 80% of average.",
               "Enable alerts for purchases > median ticket size."]
     if risk_score >= 1.2:
-      base.insert(0, "⚠️ High-risk window this week. Try one micro-rule today.")
+      base.insert(0, "High-risk window this week. Try one micro-rule today.")
     return base[:4]
 
 async def run_agent(user_text: str, nessie_txns, knot_txns, persona_style: str = "Zen Monk") -> str:
