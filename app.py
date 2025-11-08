@@ -1,23 +1,16 @@
-import os
-import asyncio
+import os, asyncio
 from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
-# Load .env first (so clients see env vars at import time)
-load_dotenv()
+load_dotenv()  # must be before importing any client code
 
 from data_layer.nessie_client import get_sample_transactions
-from data_layer.knot_client import (
-    dev_bootstrap,
-    get_merchant_accounts,
-    list_transactions_for_merchant,
-    test_auth,
-)
-from agent import run_agent
+from data_layer.knot_client import dev_bootstrap, get_merchant_accounts, list_transactions_for_merchant, test_auth
+from agent import run_agent 
+
 
 st.set_page_config(page_title="FinKarma — Finance Guardian", layout="centered")
 st.title("🟣 FinKarma — Finance Guardian")
