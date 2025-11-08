@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: FinKarma
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    plan: free
+    envVars:
+      - key: DEDALUS_API_KEY
+        sync: false
+      - key: DEDALUS_MODEL
+        value: openai/gpt-5-mini
+      - key: NESSIE_API_KEY
+        sync: false
+      - key: KNOT_CLIENT_ID
+        sync: false
+      - key: KNOT_SECRET
+        sync: false
