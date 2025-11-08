@@ -6,8 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Try Nessie’s current + legacy hosts (docs point to nessieisreal; reimaginebanking used historically)
-# Reconfigurable via NESSIE_BASE if needed.  :contentReference[oaicite:1]{index=1}
+# Try current + legacy hosts; can override with NESSIE_BASE in .env
 DEFAULT_BASES = [
     os.getenv("NESSIE_BASE") or "https://api.nessieisreal.com",
     "https://api.reimaginebanking.com",
@@ -34,21 +33,17 @@ def _http_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         for _ in range(RETRIES):
             try:
                 r = requests.get(url, timeout=TIMEOUT)
-                r.raise_error = r.raise_for_status  # compat
                 r.raise_for_status()
                 return r.json()
             except Exception as e:
                 last_err = e
                 time.sleep(0.8)
-        # try next base
     raise last_err or RuntimeError("Nessie GET failed")
 
 def list_accounts() -> List[Dict[str, Any]]:
-    # Some deployments require /customers/{id}/accounts; try global /accounts first, then fallback
     try:
         return _http_get("/accounts")
     except Exception:
-        # fallback: fetch first customer, then its accounts
         customers = _http_get("/customers")
         if not customers:
             raise
@@ -72,17 +67,15 @@ def get_sample_transactions() -> List[Dict[str, Any]]:
                 "merchant": (t.get("merchant") or {}).get("name") or t.get("description") or "Unknown",
                 "timestamp": t.get("purchase_date") or t.get("transaction_date") or t.get("date") or "",
             })
-        # cache a small sample for offline fallback
         try:
             SAMPLE_FILE.write_text(json.dumps(norm[:200], indent=2))
         except Exception:
             pass
         return norm
     except Exception:
-        # graceful offline fallback
         if SAMPLE_FILE.exists():
             return json.loads(SAMPLE_FILE.read_text())
-        # ship a minimal inline sample if no cache yet
+        # minimal inline fallback
         return [
             {"amount": 12.49, "merchant": "DoorDash", "timestamp": "2025-11-01T01:12:00"},
             {"amount": 18.90, "merchant": "UberEats", "timestamp": "2025-11-03T00:47:00"},

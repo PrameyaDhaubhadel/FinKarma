@@ -1,100 +1,109 @@
 import os
-from typing import List, Dict, Any
+import asyncio
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
-from data_layer.model_features import to_df, risk_score, cluster_persona
 
-# LLM is optional now
-try:
-    from dedalus_labs import AsyncDedalus, DedalusRunner
-    from dedalus_labs import APIStatusError  # for 402 catch
-except Exception:  # no SDK or import error
-    AsyncDedalus = None
-    DedalusRunner = None
-    class APIStatusError(Exception): ...
-    pass
-
+# Load .env first (so clients see env vars at import time)
 load_dotenv()
-MODEL = os.getenv("DEDALUS_MODEL", "openai/gpt-5-mini")
-USE_LLM = os.getenv("DEDALUS_USE_LLM", "true").lower() in {"1","true","yes","on"}
 
-def compute_fin_risk(nessie_txns: List[Dict[str,Any]], knot_txns: List[Dict[str,Any]]) -> Dict[str, Any]:
-    df = to_df(nessie_txns, knot_txns)
-    rs = risk_score(df)
-    persona = cluster_persona(df)
-    top = df.groupby("bucket")["amount"].sum().sort_values(ascending=False).head(3).to_dict() if not df.empty else {}
-    return {"risk_score": rs, "persona": persona, "top_buckets": top}
+from data_layer.nessie_client import get_sample_transactions
+from data_layer.knot_client import (
+    dev_bootstrap,
+    get_merchant_accounts,
+    list_transactions_for_merchant,
+    test_auth,
+)
+from agent import run_agent
 
-def micro_recos(persona: str, risk_score: float) -> List[str]:
-    base = []
-    if persona == "late_night_impulse":
-        base = ["Set a food cut-off at 10:30pm with a 5-min reflection timer.",
-                "Prep a 2-minute grocery list for tomorrow morning.",
-                "Swap 1 late-night delivery/week for a ready meal → save ~$40/wk."]
-    elif persona == "weekend_splurger":
-        base = ["Pre-commit a fixed 'treat budget' on Fridays.",
-                "Compare 2 cheaper bundle options before checkout.",
-                "Delay purchases >$30 by 24 hours."]
-    elif persona == "daytime_convenience":
-        base = ["Batch errands; replace 3 short rideshares with 1 planned ride.",
-                "Pack snacks/lunch 2 days/week.",
-                "Auto-cancel duplicate convenience subscriptions."]
-    else:
-        base = ["Track one category this week and cap at 80% of your average.",
-                "Enable alerts for purchases > your median ticket size."]
-    if risk_score >= 1.2:
-        base.insert(0, "⚠️ You’re in a high-risk window this week. Try one micro-rule today.")
-    return base[:4]
+st.set_page_config(page_title="FinKarma — Finance Guardian", layout="centered")
+st.title("🟣 FinKarma — Finance Guardian")
+st.caption("Nessie (mock banking) + Knot (merchant/SKU enrichment) + Dedalus (AI agent)")
 
-def _render_offline_reply(user_text: str, ctx: Dict[str, Any], recos: List[str], persona_style: str) -> str:
-    header = f"{'🧘 ' if persona_style=='Zen Monk' else '🔥 ' if persona_style=='Savage Best Friend' else '📈 '}**FinKarma ({persona_style})**"
-    lines = [header, "", f"Risk score: **{ctx['risk_score']:.2f}** · Persona: **{ctx['persona']}** · Top spend: **{ctx['top_buckets']}**", ""]
-    if ctx["risk_score"] >= 1.2:
-        lines.append("⚠️ You’re trending toward a low-balance week. Small tweaks now will prevent regret later.")
-    lines.append(f"**You said:** {user_text}")
-    lines.append("")
-    lines.append("**Try this next:**")
-    for r in recos:
-        lines.append(f"- {r}")
-    lines.append("")
-    lines.append("_(LLM is temporarily offline; showing smart rule-based tips so you can keep demoing.)_")
-    return "\n".join(lines)
+# simple dev user
+USER_ID = "demo-user-123"
 
-async def run_agent(user_text: str, nessie_txns, knot_txns, persona_style: str = "Zen Monk") -> str:
-    # Precompute context
-    ctx = compute_fin_risk(nessie_txns, knot_txns)
-    recos = micro_recos(ctx["persona"], ctx["risk_score"])
+# --- Controls ---
+persona = st.selectbox("Choose agent persona", ["Zen Monk", "Savage Best Friend", "Investor Dad"])
+use_llm = st.checkbox("Use Dedalus LLM (disable if out of credits)", value=True)
+os.environ["DEDALUS_USE_LLM"] = "true" if use_llm else "false"
 
-    # If LLM disabled or SDK missing, return offline reply
-    if not USE_LLM or AsyncDedalus is None or DedalusRunner is None:
-        return _render_offline_reply(user_text, ctx, recos, persona_style)
+# --- Knot dev helpers ---
+with st.expander("🔗 Knot (dev)"):
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Test Knot auth"):
+            try:
+                res = test_auth(USER_ID)
+                st.success("Knot auth looks good ✅ (session created).")
+                st.json(res)
+            except Exception as e:
+                st.error(f"{e}")
+                st.caption("Check KNOT_CLIENT_ID / KNOT_SECRET in your .env (dev keys, no quotes/spaces).")
 
-    # Otherwise try LLM, fall back on 402 / any error
-    prompt = f"""
-You are **FinKarma**, a friendly finance guardian. Persona: {persona_style}.
-Be supportive, not judgmental. Use specific, behavioral suggestions.
-Context (precomputed from user transactions):
-- risk_score: {ctx['risk_score']:.2f}  (0–2 scale; >1.2 = high risk)
-- persona: {ctx['persona']}
-- top_spend_buckets (last 14–30 days): {ctx['top_buckets']}
-- example_micro_recommendations: {recos}
+    with col2:
+        if st.button("Create session & list merchants"):
+            try:
+                res = dev_bootstrap(USER_ID)   # { merchants: [...], session: {"session": "<uuid>"} }
+                st.success("Knot session created; merchants loaded.")
+                st.json(res.get("merchants", []))
+                session_token = (res.get("session") or {}).get("session")
+                if not session_token:
+                    st.error("No session token returned from Knot.")
+                else:
+                    html = Path("knot_link.html").read_text(encoding="utf-8").replace("%SESSION%", session_token)
+                    components.html(html, height=700, scrolling=True)
+                    st.info("Complete the test flow in the widget (use dev/test credentials from your Knot dashboard).")
+            except Exception as e:
+                st.error(f"{e}")
 
-User said:
-\"\"\"{user_text}\"\"\"
+merchant_id = st.number_input("Dev merchant id for Knot (e.g., 19 = DoorDash)", min_value=1, value=19, step=1)
 
-Task:
-1) In 2–4 concise bullets, give tailored, behavior-level tips.
-2) Refer to the relevant spend buckets if useful.
-3) If risk is high (>1.2), open with a quick ⚠️ heads-up.
-4) Keep the tone aligned with persona = {persona_style}.
-"""
+if st.button("Pull Knot demo transactions (dev sync)"):
     try:
-        async with AsyncDedalus() as client:
-            runner = DedalusRunner(client)
-            result = await runner.run(input=prompt, model=MODEL)
-            return result.final_output
-    except APIStatusError as e:
-        # e.g., 402 balance error → fallback
-        return _render_offline_reply(user_text, ctx, recos, persona_style)
-    except Exception:
-        # any other network/SDK error → fallback
-        return _render_offline_reply(user_text, ctx, recos, persona_style)
+        knot_txns = list_transactions_for_merchant(USER_ID, int(merchant_id), max_items=100)
+        st.success(f"Pulled {len(knot_txns)} Knot dev transactions for merchant {merchant_id}")
+        st.dataframe(pd.DataFrame(knot_txns)[:50])
+        st.session_state["knot_txns"] = knot_txns
+    except Exception as e:
+        st.error(f"Knot dev sync failed: {e}")
+
+# --- Nessie / Knot live fetch ---
+if st.button("Fetch transactions (Nessie + Knot)"):
+    # Nessie (with offline fallback)
+    nessie_txns = get_sample_transactions()
+    st.write(f"Nessie transactions: {len(nessie_txns)}")
+    st.dataframe(pd.DataFrame(nessie_txns)[:50])
+
+    # Knot accounts + txns (if linked)
+    knot_txns = st.session_state.get("knot_txns", [])
+    try:
+        accounts = get_merchant_accounts(USER_ID)  # after linking via SDK
+        st.write("Knot merchant accounts:", accounts)
+        connected = [a for a in accounts if a.get("connection", {}).get("status") == "connected"]
+        if connected:
+            mid = connected[0]["merchant"]["id"]
+            knot_txns = list_transactions_for_merchant(USER_ID, int(mid), max_items=100)
+            st.success(f"Knot transactions: {len(knot_txns)}")
+            st.dataframe(pd.DataFrame(knot_txns)[:50])
+        else:
+            st.info("No connected merchants yet. Link via the Knot widget above or use the dev sync button.")
+    except Exception as e:
+        st.warning(f"Knot accounts fetch: {e}")
+
+    st.session_state["nessie_txns"] = nessie_txns
+    st.session_state["knot_txns"] = knot_txns
+
+# --- Agent ask ---
+user_text = st.text_input("Tell FinKarma what you want help with", "I think I overspend at night on delivery apps.")
+if st.button("Ask FinKarma"):
+    nessie_txns = st.session_state.get("nessie_txns", [])
+    knot_txns = st.session_state.get("knot_txns", [])
+    if not (nessie_txns or knot_txns):
+        st.warning("Fetch transactions first (or use the dev sync button).")
+    else:
+        out = asyncio.run(run_agent(user_text, nessie_txns, knot_txns, persona_style=persona))
+        st.markdown(out)

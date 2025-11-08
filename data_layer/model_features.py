@@ -55,7 +55,7 @@ def cluster_persona(df: pd.DataFrame, k: int = 3) -> str:
     X = df[["hour","dow"]].copy()
     X["is_impulse"] = df["bucket"].isin({"food","rideshare","fast_fashion","alcohol"}).astype(int)
     km = KMeans(n_clusters=k, n_init=10, random_state=7)
-    labels = km.fit_predict(X)
+    _ = km.fit_predict(X)
     centers = km.cluster_centers_
     scores = centers[:,0]/24 + centers[:,2]
     top = int(np.argmax(scores))
