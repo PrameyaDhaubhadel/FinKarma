@@ -4,26 +4,26 @@ from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 load_dotenv()
+BASE = "https://api.nessieisreal.com"  # official Nessie base
 
-NESSIE_KEY = os.getenv("NESSIE_API_KEY")
-BASE = "https://api.nessieisreal.com"  # official docs base
+def _get_key() -> str:
+    key = os.getenv("NESSIE_API_KEY")
+    if not key:
+        raise RuntimeError("Set NESSIE_API_KEY in environment (e.g., in .env)")
+    return key
 
 def _get(path: str, params: Dict[str, Any] = None):
-    if not NESSIE_KEY:
-        raise RuntimeError("Set NESSIE_API_KEY in environment")
     params = params or {}
-    params["key"] = NESSIE_KEY
+    params["key"] = _get_key()
     url = f"{BASE}{path}?{urlencode(params)}"
     r = requests.get(url, timeout=20)
     r.raise_for_status()
     return r.json()
 
 def list_accounts() -> List[Dict[str, Any]]:
-    # Example simple fetch (you can filter by type if you want)
     return _get("/accounts")
 
 def list_purchases(account_id: str) -> List[Dict[str, Any]]:
-    # GET /accounts/{id}/purchases
     return _get(f"/accounts/{account_id}/purchases")
 
 def get_sample_transactions() -> List[Dict[str, Any]]:
@@ -32,7 +32,6 @@ def get_sample_transactions() -> List[Dict[str, Any]]:
         return []
     acc = accounts[0]
     txns = list_purchases(acc["_id"])
-    # normalize
     norm = []
     for t in txns:
         norm.append({
